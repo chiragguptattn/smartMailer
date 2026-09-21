@@ -1,4 +1,6 @@
-# Cursor Cloud Automation — Gmail draft agent
+# Cursor Cloud Automation — smartMailer
+
+Repo: [chiragguptattn/smartMailer](https://github.com/chiragguptattn/smartMailer)
 
 Run this on a **schedule** (recommended every 10–15 minutes). Cursor Cloud Agents
 are not a forever process; a cron Automation achieves the same outcome without
@@ -8,7 +10,8 @@ keeping your laptop online.
 
 1. Open [cursor.com/automations](https://cursor.com/automations) (or Agents Window → Automations).
 2. **Trigger:** Schedule → custom cron, e.g. every 15 minutes: `*/15 * * * *`
-3. **Repository:** this repo (`gmail-draft-agent`), branch `main`
+3. **Repository:** `chiragguptattn/smartMailer`, branch `main`  
+   (connect GitHub under Cursor Integrations if not already linked)
 4. **Secrets** (Dashboard → [Cloud Agents Secrets](https://cursor.com/dashboard/cloud-agents)):
 
 | Secret | Source |
@@ -31,7 +34,7 @@ Helper (run locally; copies values to terminal — do not paste into chat):
 5. **Instructions** (paste into the automation prompt):
 
 ```text
-You are a scheduled runner for the Gmail draft agent. Do not open a pull request.
+You are a scheduled runner for smartMailer (Gmail draft agent). Do not open a pull request.
 Do not edit source files unless a dependency install fails and you must fix requirements.
 
 1. Working directory is the repo root.
