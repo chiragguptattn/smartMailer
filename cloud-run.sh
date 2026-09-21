@@ -8,7 +8,7 @@ PYTHON=python3
 PIP=(python3 -m pip)
 if [[ ! -f .venv/bin/activate ]]; then
   rm -rf .venv
-  python3 -m venv .venv 2>/dev/null || true
+  python3 -m venv .venv >/dev/null 2>&1 || true
 fi
 if [[ -f .venv/bin/activate ]] && [[ -x .venv/bin/python ]]; then
   # shellcheck disable=SC1091
