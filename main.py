@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from draft_replies import SkipReply, draft_reply, format_thread_for_prompt
 from gmail_auth import load_credentials
-from gmail_client import GmailClient, build_service
+from gmail_client import GmailClient, build_service, normalize_sender_domains
 
 ROOT = Path(__file__).resolve().parent
 LOG_DIR = ROOT / "logs"
@@ -76,9 +76,16 @@ def setup_logging(*, watch: bool = False) -> None:
     )
 
 
+_PLACEHOLDER_DOMAINS = {"example.com", "example.org", "your-domain.com"}
+
+
+def _domains_label(domains: list[str]) -> str:
+    return ", ".join(f"*@{d}" for d in domains)
+
+
 @dataclass
 class RunConfig:
-    domain: str
+    domains: list[str]
     max_threads: int
     label: str
     dry_run: bool
@@ -88,9 +95,12 @@ class RunConfig:
 
 
 def load_run_config(args: argparse.Namespace) -> RunConfig | None:
-    domain = getattr(args, "domain", None) or _env("GMAIL_FROM_DOMAIN")
-    if not domain:
-        logging.error("Set GMAIL_FROM_DOMAIN or pass --domain")
+    raw = getattr(args, "domain", None) or _env("GMAIL_FROM_DOMAIN")
+    domains = normalize_sender_domains(raw) if raw else []
+    if not domains:
+        logging.error(
+            "Set GMAIL_FROM_DOMAIN (comma-separated for multiple) or pass --domain"
+        )
         return None
     if not _env("CURSOR_API_KEY"):
         logging.error(
@@ -98,17 +108,19 @@ def load_run_config(args: argparse.Namespace) -> RunConfig | None:
             "https://cursor.com/dashboard/integrations"
         )
         return None
-    if domain.lower().lstrip("@") in {"example.com", "example.org", "your-domain.com"}:
-        logging.warning(
-            "GMAIL_FROM_DOMAIN=%r looks like a placeholder; set the real sender domain.",
-            domain,
-        )
+    for domain in domains:
+        if domain in _PLACEHOLDER_DOMAINS:
+            logging.warning(
+                "GMAIL_FROM_DOMAIN includes placeholder %r; set real sender domain(s).",
+                domain,
+            )
+            break
 
     include_read = bool(getattr(args, "include_read", False))
     dry = bool(getattr(args, "dry_run", False)) or _bool_env("GMAIL_DRY_RUN")
     limit = getattr(args, "limit", 0) or _int_env("GMAIL_MAX_THREADS", 10)
     return RunConfig(
-        domain=domain,
+        domains=domains,
         max_threads=limit,
         label=_env("GMAIL_PROCESSED_LABEL", "AI/Drafted") or "AI/Drafted",
         dry_run=dry,
@@ -123,7 +135,7 @@ def process_batch(client: GmailClient, cfg: RunConfig) -> dict[str, int]:
     stats = {"found": 0, "drafted": 0, "skipped": 0, "failed": 0}
     mailbox = client.profile_email()
     ids = client.list_thread_ids(
-        cfg.domain,
+        cfg.domains,
         max_results=cfg.max_threads,
         exclude_label=cfg.label,
         unread_only=cfg.unread_only,
@@ -131,16 +143,16 @@ def process_batch(client: GmailClient, cfg: RunConfig) -> dict[str, int]:
     stats["found"] = len(ids)
     if not ids:
         logging.info(
-            "No matching %s threads from *@%s",
+            "No matching %s threads from %s",
             "unread" if cfg.unread_only else "",
-            cfg.domain.lstrip("@"),
+            _domains_label(cfg.domains),
         )
         return stats
 
     logging.info(
-        "Processing %d thread(s) from *@%s (mailbox=%s dry_run=%s)",
+        "Processing %d thread(s) from %s (mailbox=%s dry_run=%s)",
         len(ids),
-        cfg.domain.lstrip("@"),
+        _domains_label(cfg.domains),
         mailbox,
         cfg.dry_run,
     )
@@ -210,33 +222,38 @@ def cmd_whoami(_: argparse.Namespace) -> int:
 
 def cmd_list(args: argparse.Namespace) -> int:
     setup_logging()
-    domain = args.domain or _env("GMAIL_FROM_DOMAIN")
-    if not domain:
-        logging.error("Set GMAIL_FROM_DOMAIN or pass --domain")
+    raw = args.domain or _env("GMAIL_FROM_DOMAIN")
+    domains = normalize_sender_domains(raw) if raw else []
+    if not domains:
+        logging.error(
+            "Set GMAIL_FROM_DOMAIN (comma-separated for multiple) or pass --domain"
+        )
         return 2
 
     max_threads = args.limit or _int_env("GMAIL_MAX_THREADS", 10)
     label = _env("GMAIL_PROCESSED_LABEL", "AI/Drafted")
     unread_only = not args.include_read
-    if domain.lower().lstrip("@") in {"example.com", "example.org", "your-domain.com"}:
-        logging.warning(
-            "GMAIL_FROM_DOMAIN=%r looks like a placeholder. "
-            "Set the real sender domain in .env.",
-            domain,
-        )
+    for domain in domains:
+        if domain in _PLACEHOLDER_DOMAINS:
+            logging.warning(
+                "GMAIL_FROM_DOMAIN includes placeholder %r. "
+                "Set the real sender domain(s) in .env.",
+                domain,
+            )
+            break
     client = connect()
     ids = client.list_thread_ids(
-        domain,
+        domains,
         max_results=max_threads,
         exclude_label=label,
         unread_only=unread_only,
     )
     scope = "unread" if unread_only else "all"
     logging.info(
-        "Found %d %s thread(s) from *@%s (excluding label %s)",
+        "Found %d %s thread(s) from %s (excluding label %s)",
         len(ids),
         scope,
-        domain.lstrip("@"),
+        _domains_label(domains),
         label,
     )
     if not ids and unread_only:
@@ -287,9 +304,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
     logging.info(
-        "Watch started pid=%s domain=*@%s interval=%ss dry_run=%s model=%s",
+        "Watch started pid=%s domains=%s interval=%ss dry_run=%s model=%s",
         os.getpid(),
-        cfg.domain.lstrip("@"),
+        _domains_label(cfg.domains),
         interval,
         cfg.dry_run,
         _env("CURSOR_MODEL") or "composer-2.5",
@@ -343,7 +360,10 @@ def build_parser() -> argparse.ArgumentParser:
     who.set_defaults(func=cmd_whoami)
 
     lst = sub.add_parser("list", help="List matching unread threads")
-    lst.add_argument("--domain", help="Sender domain, e.g. partner.com")
+    lst.add_argument(
+        "--domain",
+        help="Sender domain(s), e.g. partner.com or a.com,b.com",
+    )
     lst.add_argument("--limit", type=int, default=0, help="Max threads")
     lst.add_argument(
         "--include-read",
@@ -353,7 +373,10 @@ def build_parser() -> argparse.ArgumentParser:
     lst.set_defaults(func=cmd_list)
 
     run = sub.add_parser("run", help="One-shot: draft replies for matching unread threads")
-    run.add_argument("--domain", help="Sender domain, e.g. partner.com")
+    run.add_argument(
+        "--domain",
+        help="Sender domain(s), e.g. partner.com or a.com,b.com",
+    )
     run.add_argument("--limit", type=int, default=0, help="Max threads")
     run.add_argument("--dry-run", action="store_true", help="Do not write drafts")
     run.add_argument("-v", "--verbose", action="store_true", help="Print full thread text")
@@ -368,7 +391,10 @@ def build_parser() -> argparse.ArgumentParser:
         "watch",
         help="Always-on: poll unread mail and draft replies automatically",
     )
-    watch.add_argument("--domain", help="Sender domain, e.g. partner.com")
+    watch.add_argument(
+        "--domain",
+        help="Sender domain(s), e.g. partner.com or a.com,b.com",
+    )
     watch.add_argument("--limit", type=int, default=0, help="Max threads per cycle")
     watch.add_argument(
         "--interval",

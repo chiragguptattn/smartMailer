@@ -68,7 +68,8 @@ python main.py run --domain partner.com --dry-run -v
 python main.py run --domain partner.com
 ```
 
-Or set `GMAIL_FROM_DOMAIN` in `.env` and omit `--domain`.
+Or set `GMAIL_FROM_DOMAIN` in `.env` and omit `--domain`. Multiple domains:
+comma-separated in `.env` or `--domain a.com,b.com`.
 
 ## Always-on
 
@@ -90,7 +91,7 @@ python main.py watch --interval 60
 
 ## Behaviour
 
-- Filter: `is:unread from:*@<domain>`, excluding chats/promotions/social and threads already labeled `AI/Drafted`
+- Filter: `is:unread from:*@<domain>` (OR across multiple domains), excluding chats/promotions/social and threads already labeled `AI/Drafted`
 - Loads the **full thread**, not just the latest message
 - Creates a **draft** in that thread (reply headers when Message-ID is present)
 - Labels the thread and **marks it read** so the next unread-only run skips it
