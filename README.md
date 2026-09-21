@@ -1,6 +1,10 @@
-# Gmail draft agent
+# smartMailer
 
-Connects to your **office Gmail** (Google Workspace or personal), reads threads from a **sender domain**, analyzes the full chain, and creates **polite draft replies**. It never sends mail — you review and send in Gmail.
+Gmail draft agent for office mail: reads **unread** threads from a sender domain,
+analyzes the full chain with Cursor, and creates **polite draft replies**. Never auto-sends.
+
+**GitHub:** [chiragguptattn/smartMailer](https://github.com/chiragguptattn/smartMailer)  
+**Cloud setup:** [CLOUD.md](./CLOUD.md)
 
 ## Contents
 
