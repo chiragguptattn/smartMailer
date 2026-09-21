@@ -19,7 +19,7 @@ keeping your laptop online.
 | `CURSOR_API_KEY` | Integrations → API key |
 | `GMAIL_CREDENTIALS_JSON` | contents of `credentials.json` (one-line JSON) |
 | `GMAIL_TOKEN_JSON` | contents of `token.json` after local `python main.py auth` |
-| `GMAIL_FROM_DOMAIN` | e.g. `tothenew.com` |
+| `GMAIL_FROM_DOMAIN` | one domain or comma-separated, e.g. `client.com,vendor.org` |
 | `AGENT_SIGN_OFF_NAME` | your name |
 | `CURSOR_MODEL` | `composer-2.5` (optional) |
 | `GMAIL_MAX_THREADS` | `10` (optional) |

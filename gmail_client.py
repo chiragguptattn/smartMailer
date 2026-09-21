@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import base64
 import email.mime.text
+import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 from googleapiclient.discovery import Resource, build
 
@@ -111,6 +112,35 @@ def parse_message(raw: dict[str, Any]) -> ThreadMessage:
     )
 
 
+def normalize_sender_domains(from_domain: str | Sequence[str]) -> list[str]:
+    """Parse one or more sender domains (comma/semicolon/whitespace separated)."""
+    if isinstance(from_domain, str):
+        raw_parts = re.split(r"[,;\s]+", from_domain.strip())
+    else:
+        raw_parts = []
+        for item in from_domain:
+            raw_parts.extend(re.split(r"[,;\s]+", str(item).strip()))
+    domains: list[str] = []
+    seen: set[str] = set()
+    for part in raw_parts:
+        domain = part.strip().lstrip("@").lower()
+        if not domain or domain in seen:
+            continue
+        seen.add(domain)
+        domains.append(domain)
+    return domains
+
+
+def gmail_from_domain_clause(domains: Sequence[str]) -> str:
+    """Gmail search fragment: messages from *@domain (OR when multiple)."""
+    if not domains:
+        raise ValueError("At least one sender domain is required")
+    if len(domains) == 1:
+        return f"from:*@{domains[0]}"
+    inner = " OR ".join(f"from:*@{d}" for d in domains)
+    return f"({inner})"
+
+
 class GmailClient:
     def __init__(self, service: Resource):
         self.service = service
@@ -118,16 +148,18 @@ class GmailClient:
 
     def list_thread_ids(
         self,
-        from_domain: str,
+        from_domain: str | Sequence[str],
         *,
         max_results: int = 10,
         exclude_label: str | None = None,
         unread_only: bool = True,
     ) -> list[str]:
         """Find threads with at least one message from *@domain (unread by default)."""
-        domain = from_domain.lstrip("@").strip().lower()
+        domains = normalize_sender_domains(from_domain)
+        if not domains:
+            return []
         query_parts = [
-            f"from:*@{domain}",
+            gmail_from_domain_clause(domains),
             "-in:chats",
             "-category:promotions",
             "-category:social",
