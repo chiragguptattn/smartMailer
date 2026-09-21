@@ -1,0 +1,15 @@
+# OAuth secrets and tokens — never commit
+credentials.json
+client_secret*.json
+token.json
+tokens/
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+logs/
+watch.pid
+*.log
+.venv/
