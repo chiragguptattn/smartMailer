@@ -25,6 +25,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from calendar_digest import (
+    DATE_FORMAT,
+    calendar_digest_google_account,
+    send_calendar_digest,
+    zoho_authorize,
+)
 from draft_replies import SkipReply, draft_reply, format_thread_for_prompt
 from gmail_auth import load_credentials
 from gmail_client import GmailClient, build_service, normalize_sender_domains
@@ -220,6 +226,24 @@ def cmd_whoami(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_calendar_auth(_: argparse.Namespace) -> int:
+    setup_logging()
+    email = calendar_digest_google_account()
+    logging.info("Calendar digest Google token ready for %s", email)
+    return 0
+
+
+def cmd_zoho_auth(_: argparse.Namespace) -> int:
+    setup_logging()
+    try:
+        token_path = zoho_authorize()
+    except Exception as exc:
+        logging.error("Zoho auth failed: %s", exc)
+        return 2
+    logging.info("Zoho token saved to %s", token_path)
+    return 0
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     setup_logging()
     raw = args.domain or _env("GMAIL_FROM_DOMAIN")
@@ -276,6 +300,34 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
     client = connect()
     process_batch(client, cfg)
+    return 0
+
+
+def cmd_calendar_digest(args: argparse.Namespace) -> int:
+    setup_logging()
+    try:
+        result = send_calendar_digest(
+            args.date,
+            recipients=args.to,
+            dry_run=args.dry_run,
+        )
+    except Exception as exc:
+        logging.error("Calendar digest failed: %s", exc)
+        return 2
+
+    logging.info(
+        "Calendar digest date=%s gmail_events=%s secondary_events=%s conflicts=%s "
+        "recipients=%s sent=%s message_id=%s",
+        result.digest_date.strftime(DATE_FORMAT),
+        result.google_events,
+        result.secondary_events,
+        result.conflict_groups,
+        ", ".join(result.recipients),
+        result.sent,
+        result.message_id or "-",
+    )
+    if args.dry_run:
+        print(result.html_body)
     return 0
 
 
@@ -359,6 +411,18 @@ def build_parser() -> argparse.ArgumentParser:
     who = sub.add_parser("whoami", help="Print connected Gmail address")
     who.set_defaults(func=cmd_whoami)
 
+    cal_auth = sub.add_parser(
+        "calendar-auth",
+        help="OAuth login for calendar digest Gmail send + Google Calendar read scopes",
+    )
+    cal_auth.set_defaults(func=cmd_calendar_auth)
+
+    zoho_auth = sub.add_parser(
+        "zoho-auth",
+        help="OAuth login for Zoho Calendar read access",
+    )
+    zoho_auth.set_defaults(func=cmd_zoho_auth)
+
     lst = sub.add_parser("list", help="List matching unread threads")
     lst.add_argument(
         "--domain",
@@ -386,6 +450,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include already-read threads (default: unread only)",
     )
     run.set_defaults(func=cmd_run)
+
+    cal = sub.add_parser(
+        "calendar-digest",
+        help="Send Gmail + Zoho meeting schedule from primary Gmail",
+    )
+    cal.add_argument(
+        "--date",
+        help="Digest date in DD-MM-YYYY format, e.g. 25-08-2026. Defaults to today.",
+    )
+    cal.add_argument(
+        "--to",
+        help="Comma-separated recipients. Defaults to CALENDAR_DIGEST_RECIPIENTS.",
+    )
+    cal.add_argument("--dry-run", action="store_true", help="Print HTML without sending")
+    cal.set_defaults(func=cmd_calendar_digest)
 
     watch = sub.add_parser(
         "watch",
@@ -415,7 +494,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_dotenv(ROOT / ".env")
+    env_path = ROOT / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+    else:
+        load_dotenv(ROOT / ".env.example", override=True)
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

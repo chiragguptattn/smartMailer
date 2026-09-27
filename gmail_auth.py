@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Sequence
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -47,6 +48,10 @@ def _materialize_from_env(env_name: str, dest: Path) -> bool:
 def load_credentials(
     credentials_path: str | Path,
     token_path: str | Path,
+    *,
+    scopes: Sequence[str] | None = None,
+    credentials_env_name: str = "GMAIL_CREDENTIALS_JSON",
+    token_env_name: str = "GMAIL_TOKEN_JSON",
 ) -> Credentials:
     """Load or refresh user credentials.
 
@@ -56,8 +61,9 @@ def load_credentials(
     credentials_path = Path(credentials_path).expanduser().resolve()
     token_path = Path(token_path).expanduser().resolve()
 
-    from_env_creds = _materialize_from_env("GMAIL_CREDENTIALS_JSON", credentials_path)
-    from_env_token = _materialize_from_env("GMAIL_TOKEN_JSON", token_path)
+    requested_scopes = list(scopes or SCOPES)
+    from_env_creds = _materialize_from_env(credentials_env_name, credentials_path)
+    from_env_token = _materialize_from_env(token_env_name, token_path)
     cloudish = from_env_creds or from_env_token or bool(
         os.environ.get("CURSOR_AGENT") or os.environ.get("CURSOR_CLOUD")
     )
@@ -71,12 +77,12 @@ def load_credentials(
 
     creds: Credentials | None = None
     if token_path.is_file():
-        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        creds = Credentials.from_authorized_user_file(str(token_path), requested_scopes)
 
-    if creds and creds.valid:
+    if creds and creds.valid and creds.has_scopes(requested_scopes):
         return creds
 
-    if creds and creds.expired and creds.refresh_token:
+    if creds and creds.expired and creds.refresh_token and creds.has_scopes(requested_scopes):
         creds.refresh(Request())
         token_path.write_text(creds.to_json(), encoding="utf-8")
         return creds
@@ -84,11 +90,14 @@ def load_credentials(
     if cloudish:
         raise RuntimeError(
             "Gmail token missing/invalid in Cloud. Run `python main.py auth` locally, "
-            "then set secret GMAIL_TOKEN_JSON to the contents of token.json "
-            "(and GMAIL_CREDENTIALS_JSON from credentials.json)."
+            f"then set secret {token_env_name} to the contents of {token_path.name} "
+            f"(and {credentials_env_name} from {credentials_path.name})."
         )
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(
+        str(credentials_path),
+        requested_scopes,
+    )
     creds = flow.run_local_server(port=0)
 
     token_path.parent.mkdir(parents=True, exist_ok=True)

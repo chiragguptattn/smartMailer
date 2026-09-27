@@ -1,9 +1,21 @@
+# Local configuration — never commit secrets
+.env
+.env.*
+!.env.example
+
 # OAuth secrets and tokens — never commit
 credentials.json
+credentials*.json
 client_secret*.json
 token.json
+token*.json
+token.calendar.json
+zoho_token.json
+zoho_token*.json
 tokens/
-.env
+
+# Runtime / local environment
+.idea/
 .venv/
 venv/
 __pycache__/
@@ -12,4 +24,3 @@ __pycache__/
 logs/
 watch.pid
 *.log
-.venv/
