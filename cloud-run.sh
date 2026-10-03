@@ -13,7 +13,7 @@ if [[ -f .venv/bin/activate ]]; then
   source .venv/bin/activate
   pip install -q -r requirements.txt
 else
-  if python3 -m venv .venv 2>/dev/null; then
+  if python3 -m venv .venv &>/dev/null; then
     if [[ -f .venv/bin/activate ]]; then
       # shellcheck disable=SC1091
       source .venv/bin/activate
