@@ -10,7 +10,7 @@ if [[ -x .venv/bin/python ]]; then
   pip install -q -r requirements.txt
 else
   rm -rf .venv
-  if python3 -m venv .venv 2>/dev/null && [[ -x .venv/bin/python ]]; then
+  if python3 -m venv .venv &>/dev/null && [[ -x .venv/bin/python ]]; then
     # shellcheck disable=SC1091
     source .venv/bin/activate
     pip install -q -r requirements.txt
