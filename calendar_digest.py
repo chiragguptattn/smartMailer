@@ -62,6 +62,10 @@ class CalendarEvent:
     organizer: str = ""
     link: str = ""
     is_all_day: bool = False
+    description: str = ""
+    attendees: tuple[str, ...] = ()
+    meeting_url: str = ""
+    status: str = ""
 
 
 @dataclass(frozen=True)
@@ -76,8 +80,38 @@ class CalendarDigestResult:
     html_body: str = ""
 
 
+@dataclass(frozen=True)
+class CalendarEventInsight:
+    event_index: int
+    priority: str
+    context_note: str = ""
+    preparation_note: str = ""
+
+
+@dataclass(frozen=True)
+class CalendarConflictInsight:
+    group: int
+    explanation: str
+    recommendation: str = ""
+
+
+@dataclass(frozen=True)
+class CalendarAiInsights:
+    daily_brief: str = ""
+    today_focus: tuple[str, ...] = ()
+    events: tuple[CalendarEventInsight, ...] = ()
+    conflicts: tuple[CalendarConflictInsight, ...] = ()
+
+
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = _env(name)
+    if not raw:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
 
 
 def _split_csv(raw: str) -> list[str]:
@@ -130,6 +164,46 @@ def _parse_dt(value: str, tz: ZoneInfo) -> datetime:
     return parsed.astimezone(tz)
 
 
+def _clean_event_detail(value: Any, *, limit: int = 2000) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?is)<style.*?</style>|<script.*?</script>", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n", text)
+    text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "..."
+
+
+def _google_attendees(raw: dict[str, Any]) -> tuple[str, ...]:
+    attendees: list[str] = []
+    for item in raw.get("attendees", []):
+        if not isinstance(item, dict):
+            continue
+        label = item.get("email") or item.get("displayName") or ""
+        if label:
+            attendees.append(str(label))
+    return tuple(dict.fromkeys(attendees))
+
+
+def _google_meeting_url(raw: dict[str, Any]) -> str:
+    if raw.get("hangoutLink"):
+        return str(raw["hangoutLink"])
+    conference = raw.get("conferenceData") or {}
+    for entry in conference.get("entryPoints", []):
+        if not isinstance(entry, dict):
+            continue
+        uri = entry.get("uri")
+        if uri:
+            return str(uri)
+    return ""
+
+
 def _parse_google_event(raw: dict[str, Any], *, tz: ZoneInfo, source: str) -> CalendarEvent:
     start_raw = raw.get("start") or {}
     end_raw = raw.get("end") or {}
@@ -152,6 +226,10 @@ def _parse_google_event(raw: dict[str, Any], *, tz: ZoneInfo, source: str) -> Ca
         organizer=organizer.get("email") or organizer.get("displayName") or "",
         link=raw.get("htmlLink") or "",
         is_all_day=is_all_day,
+        description=_clean_event_detail(raw.get("description")),
+        attendees=_google_attendees(raw),
+        meeting_url=_google_meeting_url(raw),
+        status=raw.get("status") or "",
     )
 
 
@@ -472,6 +550,44 @@ def _parse_zoho_datetime(value: str, event_tz_name: str, fallback_tz: ZoneInfo) 
     return parsed.replace(tzinfo=event_tz).astimezone(fallback_tz), False
 
 
+def _first_text(raw: dict[str, Any], keys: Sequence[str]) -> str:
+    for key in keys:
+        value = raw.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _zoho_attendees(raw: dict[str, Any]) -> tuple[str, ...]:
+    values: list[str] = []
+    candidates = (
+        raw.get("attendees"),
+        raw.get("participants"),
+        raw.get("invitees"),
+        raw.get("users"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            cleaned = _clean_event_detail(candidate, limit=800)
+            if cleaned:
+                values.extend(part.strip() for part in re.split(r"[,;\n]+", cleaned) if part.strip())
+        elif isinstance(candidate, list):
+            for item in candidate:
+                if isinstance(item, dict):
+                    label = (
+                        item.get("email")
+                        or item.get("mail")
+                        or item.get("name")
+                        or item.get("displayName")
+                        or item.get("display_name")
+                    )
+                    if label:
+                        values.append(str(label))
+                elif item:
+                    values.append(str(item))
+    return tuple(dict.fromkeys(values))
+
+
 def parse_zoho_event(raw: dict[str, Any], tz: ZoneInfo) -> CalendarEvent:
     date_time = raw.get("dateandtime") or {}
     if isinstance(date_time, str):
@@ -505,6 +621,12 @@ def parse_zoho_event(raw: dict[str, Any], tz: ZoneInfo) -> CalendarEvent:
         organizer=raw.get("organizer") or raw.get("createdby") or "",
         link=raw.get("url") or "",
         is_all_day=bool(raw.get("isallday")) or is_all_day,
+        description=_clean_event_detail(
+            _first_text(raw, ("description", "desc", "notes", "comment", "comments"))
+        ),
+        attendees=_zoho_attendees(raw),
+        meeting_url=_first_text(raw, ("meeting_url", "meetingUrl", "conference_url", "url")),
+        status=str(raw.get("status") or ""),
     )
 
 
@@ -715,10 +837,288 @@ def conflict_groups(events: Sequence[CalendarEvent]) -> dict[int, int]:
     return grouped
 
 
+def _clock_label(value: datetime) -> str:
+    return value.strftime("%I:%M %p")
+
+
+def _time_range_label(start: datetime, end: datetime) -> str:
+    return f"{_clock_label(start)} - {_clock_label(end)}"
+
+
+def conflict_summaries(
+    events: Sequence[CalendarEvent],
+    groups: dict[int, int],
+) -> dict[int, dict[str, Any]]:
+    summaries: dict[int, dict[str, Any]] = {}
+    for group in sorted(set(groups.values())):
+        indexes = [idx for idx, value in groups.items() if value == group]
+        grouped_events = [events[idx] for idx in indexes]
+        starts = [event.start for event in grouped_events]
+        ends = [event.end for event in grouped_events]
+        common_start, common_end = max(starts), min(ends)
+        summaries[group] = {
+            "group": group,
+            "event_indexes": indexes,
+            "event_titles": [event.title for event in grouped_events],
+            "affected_window": _time_range_label(min(starts), max(ends)),
+            "common_overlap": (
+                _time_range_label(common_start, common_end)
+                if common_start < common_end
+                else ""
+            ),
+        }
+    return summaries
+
+
+CALENDAR_AI_SYSTEM_PROMPT = """You are a careful calendar assistant.
+
+Analyze a single-day meeting schedule and return ONLY valid JSON:
+{
+  "daily_brief": "3-5 sentence practical summary of the day using titles, descriptions, attendees, and conflict data",
+  "today_focus": ["most useful action or risk to pay attention to"],
+  "events": [
+    {
+      "event_index": 0,
+      "priority": "High | Medium | Low",
+      "context_note": "short useful context from the title/description/attendees, or empty string",
+      "preparation_note": "specific preparation tip, or empty string"
+    }
+  ],
+  "conflicts": [
+    {
+      "group": 1,
+      "explanation": "why the overlap matters",
+      "recommendation": "specific action to handle it"
+    }
+  ]
+}
+
+Rules:
+- Base everything only on the event data provided.
+- Do not invent attendees, documents, business facts, links, or commitments.
+- Use event descriptions when available, but summarize them. Never paste long raw descriptions.
+- today_focus should contain 2-4 short bullets about the most important risks, preparation, or flow of the day.
+- Use High priority for external/client-facing, interviews, reviews, escalations, or ambiguous but important meetings.
+- Use Medium for normal internal syncs and planned work.
+- Use Low for optional, tentative, social, or broad informational events.
+- context_note should explain why the meeting matters when the event has useful details. Leave it empty for obvious or low-information events.
+- Preparation notes must be short and concrete. If no useful preparation is implied, return an empty string.
+- Conflict recommendations should use the provided overlap windows and be practical, such as join the higher-priority meeting first, ask for notes, or request a reschedule.
+- Keep all text concise and office-appropriate.
+"""
+
+
+def _calendar_ai_model_id() -> str:
+    return _env("CALENDAR_DIGEST_AI_MODEL", _env("CURSOR_MODEL", "composer-2.5")) or "composer-2.5"
+
+
+def _calendar_ai_enabled() -> bool:
+    raw = _env("CALENDAR_DIGEST_AI").lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return bool(_env("CURSOR_API_KEY"))
+
+
+def _format_event_for_ai(idx: int, event: CalendarEvent, group: int | None) -> dict[str, Any]:
+    return {
+        "event_index": idx,
+        "calendar": event.source,
+        "calendar_email": event.calendar_email,
+        "title": event.title,
+        "time": _time_label(event),
+        "start": event.start.isoformat(),
+        "end": event.end.isoformat(),
+        "location": event.location,
+        "organizer": event.organizer,
+        "attendees": list(event.attendees[:12]),
+        "attendee_count": len(event.attendees),
+        "description": _clean_event_detail(event.description, limit=900),
+        "meeting_url_available": bool(event.meeting_url),
+        "calendar_link_available": bool(event.link),
+        "status": event.status,
+        "is_all_day": event.is_all_day,
+        "conflict_group": group,
+    }
+
+
+def _parse_json_object(raw: str) -> dict[str, Any]:
+    text = raw.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+    text = re.sub(r"\s*```$", "", text)
+    if not text.startswith("{"):
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start : end + 1]
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise RuntimeError("Calendar AI did not return a JSON object")
+    return data
+
+
+def _clamp_text(value: Any, limit: int) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "..."
+
+
+def _list_values(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if value:
+        return [value]
+    return []
+
+
+def _clamped_list(value: Any, limit: int, max_items: int) -> tuple[str, ...]:
+    items: list[str] = []
+    for item in _list_values(value):
+        text = _clamp_text(item, limit)
+        if text:
+            items.append(text)
+        if len(items) >= max_items:
+            break
+    return tuple(items)
+
+
+def parse_calendar_ai_insights(
+    payload: dict[str, Any],
+    *,
+    event_count: int,
+    valid_conflict_groups: set[int],
+) -> CalendarAiInsights:
+    """Validate model JSON against the events that actually exist."""
+    events: list[CalendarEventInsight] = []
+    seen_events: set[int] = set()
+    for item in payload.get("events", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            event_index = int(item.get("event_index"))
+        except (TypeError, ValueError):
+            continue
+        if event_index < 0 or event_index >= event_count or event_index in seen_events:
+            continue
+        priority = _clamp_text(item.get("priority"), 24).title()
+        if priority not in {"High", "Medium", "Low"}:
+            priority = "Medium"
+        events.append(
+            CalendarEventInsight(
+                event_index=event_index,
+                priority=priority,
+                context_note=_clamp_text(item.get("context_note"), 220),
+                preparation_note=_clamp_text(item.get("preparation_note"), 180),
+            )
+        )
+        seen_events.add(event_index)
+
+    conflicts: list[CalendarConflictInsight] = []
+    seen_conflicts: set[int] = set()
+    for item in payload.get("conflicts", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            group = int(item.get("group"))
+        except (TypeError, ValueError):
+            continue
+        if group not in valid_conflict_groups or group in seen_conflicts:
+            continue
+        explanation = _clamp_text(item.get("explanation"), 220)
+        recommendation = _clamp_text(item.get("recommendation"), 220)
+        if not explanation and not recommendation:
+            continue
+        conflicts.append(
+            CalendarConflictInsight(
+                group=group,
+                explanation=explanation,
+                recommendation=recommendation,
+            )
+        )
+        seen_conflicts.add(group)
+
+    return CalendarAiInsights(
+        daily_brief=_clamp_text(payload.get("daily_brief"), 420),
+        today_focus=_clamped_list(payload.get("today_focus"), 180, 4),
+        events=tuple(events),
+        conflicts=tuple(conflicts),
+    )
+
+
+def generate_calendar_ai_insights(
+    events: Sequence[CalendarEvent],
+    day: date,
+    tz: ZoneInfo,
+) -> CalendarAiInsights:
+    """Ask Cursor for a daily brief, event priorities, prep notes, and conflict advice."""
+    if not events:
+        return CalendarAiInsights()
+    api_key = _env("CURSOR_API_KEY")
+    if not api_key:
+        raise RuntimeError("Set CURSOR_API_KEY to enable calendar AI insights.")
+
+    ordered = sorted(events, key=lambda e: (e.start, e.end, e.source, e.title.lower()))
+    groups = conflict_groups(ordered)
+    payload = {
+        "date": format_digest_date(day),
+        "timezone": tz.key,
+        "conflicts": list(conflict_summaries(ordered, groups).values()),
+        "events": [
+            _format_event_for_ai(idx, event, groups.get(idx))
+            for idx, event in enumerate(ordered)
+        ],
+    }
+    prompt = (
+        f"{CALENDAR_AI_SYSTEM_PROMPT}\n\n"
+        "Analyze this schedule JSON:\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    )
+
+    try:
+        from cursor_sdk import Agent, AgentOptions, CursorAgentError, LocalAgentOptions
+    except ImportError as exc:
+        raise RuntimeError("Install cursor-sdk to enable calendar AI insights.") from exc
+
+    try:
+        result = Agent.prompt(
+            prompt,
+            AgentOptions(
+                api_key=api_key,
+                model=_calendar_ai_model_id(),
+                name="calendar-digest-ai",
+                tools=[],
+                local=LocalAgentOptions(cwd=str(ROOT)),
+            ),
+        )
+    except CursorAgentError as exc:
+        raise RuntimeError(
+            f"Calendar AI failed to start: {exc.message} "
+            f"(retryable={exc.is_retryable})"
+        ) from exc
+
+    status = getattr(result, "status", None)
+    status_s = status if isinstance(status, str) else getattr(status, "value", str(status))
+    if status_s == "error":
+        raise RuntimeError(f"Calendar AI run failed (id={result.id})")
+    text = (result.result or "").strip()
+    if not text:
+        raise RuntimeError(f"Calendar AI returned empty result (id={result.id})")
+
+    return parse_calendar_ai_insights(
+        _parse_json_object(text),
+        event_count=len(ordered),
+        valid_conflict_groups=set(groups.values()),
+    )
+
+
 def _time_label(event: CalendarEvent) -> str:
     if event.is_all_day:
         return "All day"
-    return f"{event.start.strftime('%I:%M %p')} - {event.end.strftime('%I:%M %p')}"
+    return _time_range_label(event.start, event.end)
 
 
 def _source_summary(events: Sequence[CalendarEvent]) -> str:
@@ -733,7 +1133,222 @@ def _source_summary(events: Sequence[CalendarEvent]) -> str:
     )
 
 
-def _event_rows(events: Sequence[CalendarEvent], groups: dict[int, int]) -> str:
+def _priority_badge(priority: str) -> str:
+    colors = {
+        "High": ("#fef3f2", "#b42318", "#fecdca"),
+        "Medium": ("#fffaeb", "#b54708", "#fedf89"),
+        "Low": ("#ecfdf3", "#027a48", "#abefc6"),
+    }
+    bg, fg, border = colors.get(priority, ("#f8fafc", "#344054", "#d0d5dd"))
+    return (
+        f'<span style="display: inline-block; margin-left: 8px; padding: 2px 7px; '
+        f'border-radius: 999px; background: {bg}; color: {fg}; border: 1px solid {border}; '
+        f'font-size: 11px; font-weight: 700; white-space: nowrap;">'
+        f"{html.escape(priority)}</span>"
+    )
+
+
+def _event_detail_excerpt(event: CalendarEvent, limit: int = 180) -> str:
+    return _clamp_text(_clean_event_detail(event.description, limit=limit * 2), limit)
+
+
+def _default_priority(event: CalendarEvent, group: int | None) -> str:
+    if group:
+        return "High"
+    if event.is_all_day:
+        return "Low"
+    if event.attendees or event.organizer or event.description:
+        return "Medium"
+    return "Low"
+
+
+def _default_context_note(event: CalendarEvent) -> str:
+    detail = _event_detail_excerpt(event)
+    if detail:
+        return detail
+    if event.attendees:
+        return f"Includes {len(event.attendees)} attendee{'s' if len(event.attendees) != 1 else ''}."
+    if event.organizer:
+        return f"Organized by {event.organizer}."
+    return ""
+
+
+def _default_prep_note(event: CalendarEvent, group: int | None) -> str:
+    if group and event.description:
+        return "Review the event details, then confirm which overlapping meeting should take priority."
+    if group:
+        return "Confirm which overlapping meeting should take priority before the slot starts."
+    if event.description:
+        return "Review the event details before joining."
+    return ""
+
+
+def _complete_event_insights(
+    events: Sequence[CalendarEvent],
+    groups: dict[int, int],
+    ai_insights: CalendarAiInsights | None,
+) -> dict[int, CalendarEventInsight]:
+    completed = {
+        insight.event_index: insight
+        for insight in (ai_insights.events if ai_insights else ())
+        if 0 <= insight.event_index < len(events)
+    }
+    for idx, event in enumerate(events):
+        existing = completed.get(idx)
+        group = groups.get(idx)
+        if existing:
+            completed[idx] = CalendarEventInsight(
+                event_index=idx,
+                priority=existing.priority or _default_priority(event, group),
+                context_note=existing.context_note or _default_context_note(event),
+                preparation_note=existing.preparation_note or _default_prep_note(event, group),
+            )
+            continue
+        priority = _default_priority(event, group)
+        context = _default_context_note(event)
+        prep = _default_prep_note(event, group)
+        if priority != "Low" or context or prep:
+            completed[idx] = CalendarEventInsight(
+                event_index=idx,
+                priority=priority,
+                context_note=context,
+                preparation_note=prep,
+            )
+    return completed
+
+
+def _default_today_focus(
+    events: Sequence[CalendarEvent],
+    summaries: dict[int, dict[str, Any]],
+) -> tuple[str, ...]:
+    focus: list[str] = []
+    for group, summary in sorted(summaries.items()):
+        overlap = summary.get("common_overlap") or summary.get("affected_window") or ""
+        titles = ", ".join(str(title) for title in summary.get("event_titles", [])[:3])
+        if overlap and titles:
+            focus.append(f"Resolve Conflict {group} around {overlap}: {titles}.")
+    detail_events = [event for event in events if event.description]
+    if detail_events:
+        focus.append(
+            f"Review details for {len(detail_events)} meeting"
+            f"{'s' if len(detail_events) != 1 else ''} with calendar notes."
+        )
+    return tuple(focus[:4])
+
+
+def _ai_summary_html(
+    ai_insights: CalendarAiInsights | None,
+    fallback_focus: Sequence[str] = (),
+) -> str:
+    focus_items = ai_insights.today_focus if ai_insights else ()
+    if not focus_items:
+        focus_items = tuple(fallback_focus)
+    if not ai_insights or not (ai_insights.daily_brief or focus_items):
+        return ""
+    brief = (
+        f'<div style="font-size: 14px; line-height: 1.55; color: #1d2939; padding-top: 7px;">'
+        f"{html.escape(ai_insights.daily_brief)}</div>"
+        if ai_insights.daily_brief
+        else ""
+    )
+    title = "AI daily brief" if ai_insights.daily_brief else "Schedule focus"
+    focus = ""
+    if focus_items:
+        items = "".join(
+            f'<li style="margin: 4px 0;">{html.escape(item)}</li>'
+            for item in focus_items
+        )
+        focus = (
+            f'<div style="font-size: 12px; color: #175cd3; font-weight: 700; '
+            f'text-transform: uppercase; letter-spacing: 0.3px; padding-top: 12px;">'
+            f"Today's focus</div>"
+            f'<ul style="margin: 6px 0 0 18px; padding: 0; font-size: 13px; '
+            f'line-height: 1.45; color: #344054;">{items}</ul>'
+        )
+    return f"""
+        <tr>
+          <td style="padding: 18px 24px 4px 24px;">
+            <div style="border: 1px solid #bfdbfe; border-radius: 10px; background: #eff6ff; padding: 14px 16px;">
+              <div style="font-size: 12px; color: #175cd3; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;">{html.escape(title)}</div>
+              {brief}
+              {focus}
+            </div>
+          </td>
+        </tr>"""
+
+
+def _ai_conflicts_html(
+    ai_insights: CalendarAiInsights | None,
+    summaries: dict[int, dict[str, Any]],
+) -> str:
+    if not ai_insights or not ai_insights.conflicts:
+        return ""
+    items: list[str] = []
+    for insight in sorted(ai_insights.conflicts, key=lambda item: item.group):
+        summary = summaries.get(insight.group, {})
+        common = summary.get("common_overlap") or ""
+        affected = summary.get("affected_window") or ""
+        titles = ", ".join(str(title) for title in summary.get("event_titles", [])[:4])
+        timing = ""
+        if common or affected:
+            timing = (
+                f'<div style="font-size: 12px; line-height: 1.45; color: #667085; padding-top: 4px;">'
+                f'<strong>Overlap:</strong> {html.escape(common or affected)}'
+                f"{' | ' if titles else ''}{html.escape(titles)}</div>"
+            )
+        recommendation = (
+            f'<div style="font-size: 13px; line-height: 1.45; color: #475467; padding-top: 4px;">'
+            f'<strong>Recommendation:</strong> {html.escape(insight.recommendation)}</div>'
+            if insight.recommendation
+            else ""
+        )
+        explanation = html.escape(insight.explanation or "Review this overlap before the meeting starts.")
+        items.append(
+            f'<div style="padding: 10px 0; border-top: 1px solid #fed7aa;">'
+            f'<div style="font-size: 13px; color: #9a3412; font-weight: 700;">Conflict {insight.group}</div>'
+            f"{timing}"
+            f'<div style="font-size: 13px; line-height: 1.45; color: #344054; padding-top: 4px;">{explanation}</div>'
+            f"{recommendation}"
+            f"</div>"
+        )
+    return f"""
+        <tr>
+          <td style="padding: 6px 24px 6px 24px;">
+            <div style="border: 1px solid #fed7aa; border-radius: 10px; background: #fff7ed; padding: 4px 14px 6px 14px;">
+              {''.join(items)}
+            </div>
+          </td>
+        </tr>"""
+
+
+def _event_meta_html(event: CalendarEvent) -> str:
+    parts: list[str] = []
+    if event.organizer:
+        parts.append(f"Organizer: {event.organizer}")
+    if event.attendees:
+        parts.append(f"Attendees: {len(event.attendees)}")
+    if event.status:
+        parts.append(f"Status: {event.status.title()}")
+    if not parts and not event.meeting_url:
+        return ""
+    meta = html.escape(" | ".join(parts))
+    join = (
+        f' <a href="{html.escape(event.meeting_url, quote=True)}" '
+        f'style="color: #175cd3; text-decoration: none; font-weight: 700;">Join</a>'
+        if event.meeting_url
+        else ""
+    )
+    return (
+        f'<div style="font-size: 12px; line-height: 1.45; color: #667085; '
+        f'padding-top: 6px;">{meta}{join if meta else join.strip()}</div>'
+    )
+
+
+def _event_rows(
+    events: Sequence[CalendarEvent],
+    groups: dict[int, int],
+    ai_insights: CalendarAiInsights | None = None,
+) -> str:
     if not events:
         return (
             '<tr><td colspan="5" style="padding: 22px; color: #667085; text-align: center; '
@@ -745,8 +1360,10 @@ def _event_rows(events: Sequence[CalendarEvent], groups: dict[int, int]) -> str:
             "</td></tr>"
         )
     rows: list[str] = []
+    event_insights = _complete_event_insights(events, groups, ai_insights)
     for idx, event in enumerate(events):
         group = groups.get(idx)
+        insight = event_insights.get(idx)
         color = CONFLICT_COLORS[(group - 1) % len(CONFLICT_COLORS)] if group else "#ffffff"
         border_color = "#dc6803" if group else "#e4e7ec"
         conflict = (
@@ -767,6 +1384,23 @@ def _event_rows(events: Sequence[CalendarEvent], groups: dict[int, int]) -> str:
                 f'<a href="{html.escape(event.link, quote=True)}" '
                 f'style="color: #175cd3; text-decoration: none; font-weight: 700;">{title}</a>'
             )
+        if insight:
+            title = f"{title}{_priority_badge(insight.priority)}"
+            if insight.context_note:
+                title = (
+                    f"{title}"
+                    f'<div style="font-size: 12px; line-height: 1.45; color: #344054; '
+                    f'padding-top: 6px;"><strong>Context:</strong> '
+                    f"{html.escape(insight.context_note)}</div>"
+                )
+            if insight.preparation_note:
+                title = (
+                    f"{title}"
+                    f'<div style="font-size: 12px; line-height: 1.45; color: #475467; '
+                    f'padding-top: 6px;"><strong>Prep:</strong> '
+                    f"{html.escape(insight.preparation_note)}</div>"
+                )
+        title = f"{title}{_event_meta_html(event)}"
         location = html.escape(event.location or "-")
         rows.append(
             "<tr>"
@@ -787,9 +1421,16 @@ def _event_rows(events: Sequence[CalendarEvent], groups: dict[int, int]) -> str:
     return "".join(rows)
 
 
-def build_digest_html(events: Sequence[CalendarEvent], day: date, tz: ZoneInfo) -> str:
+def build_digest_html(
+    events: Sequence[CalendarEvent],
+    day: date,
+    tz: ZoneInfo,
+    ai_insights: CalendarAiInsights | None = None,
+) -> str:
     ordered = sorted(events, key=lambda e: (e.start, e.end, e.source, e.title.lower()))
     groups = conflict_groups(ordered)
+    summaries = conflict_summaries(ordered, groups)
+    fallback_focus = _default_today_focus(ordered, summaries)
     conflict_count = len(set(groups.values()))
     meeting_count = len(ordered)
     date_label = format_digest_date(day)
@@ -807,6 +1448,7 @@ def build_digest_html(events: Sequence[CalendarEvent], day: date, tz: ZoneInfo) 
             <div style="font-size: 14px; line-height: 1.45; color: #475467; padding-top: 6px;">Gmail and {html.escape(secondary_label)} meetings in {html.escape(tz.key)}</div>
           </td>
         </tr>
+        {_ai_summary_html(ai_insights, fallback_focus)}
         <tr>
           <td style="padding: 18px 24px 6px 24px;">
             <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: collapse;">
@@ -833,6 +1475,7 @@ def build_digest_html(events: Sequence[CalendarEvent], day: date, tz: ZoneInfo) 
             </table>
           </td>
         </tr>
+        {_ai_conflicts_html(ai_insights, summaries)}
         <tr>
           <td style="padding: 6px 24px 22px 24px;">
             <table cellpadding="0" cellspacing="0" width="100%" style="border-collapse: separate; border-spacing: 0; width: 100%; border: 1px solid #d0d5dd; border-radius: 10px; overflow: hidden;">
@@ -845,7 +1488,7 @@ def build_digest_html(events: Sequence[CalendarEvent], day: date, tz: ZoneInfo) 
       <th align="left" style="padding: 11px 10px; border-bottom: 1px solid #d0d5dd; color: #475467; font-size: 12px; text-transform: uppercase; letter-spacing: 0.3px;">Status</th>
     </tr>
   </thead>
-  <tbody>{_event_rows(ordered, groups)}</tbody>
+  <tbody>{_event_rows(ordered, groups, ai_insights)}</tbody>
 </table>
             <div style="font-size: 13px; line-height: 1.5; color: #667085; padding-top: 16px;">
               Regards,<br>
@@ -930,12 +1573,18 @@ def send_calendar_digest(
     google_events = list_google_events(google_calendar, day, tz)
     secondary_events = ZohoCalendarClient.from_env().list_events(day, tz)
     all_events = [*google_events, *secondary_events]
-    html_body = build_digest_html(all_events, day, tz)
     ordered_events = sorted(
         all_events,
         key=lambda e: (e.start, e.end, e.source, e.title.lower()),
     )
     groups = conflict_groups(ordered_events)
+    ai_insights = CalendarAiInsights()
+    if _calendar_ai_enabled():
+        try:
+            ai_insights = generate_calendar_ai_insights(all_events, day, tz)
+        except Exception as exc:
+            logging.warning("Calendar AI insights unavailable; sending standard digest: %s", exc)
+    html_body = build_digest_html(all_events, day, tz, ai_insights=ai_insights)
     subject = f"Meeting schedule for {format_digest_date(day)}"
 
     if dry_run:

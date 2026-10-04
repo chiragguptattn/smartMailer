@@ -338,6 +338,8 @@ Full calendar digest block:
 ```dotenv
 CALENDAR_DIGEST_TIMEZONE=Asia/Kolkata
 CALENDAR_DIGEST_RECIPIENTS=your.primary.gmail@gmail.com,your.zoho@zohomail.com
+CALENDAR_DIGEST_AI=auto
+CALENDAR_DIGEST_AI_MODEL=composer-2.5
 
 GOOGLE_CALENDAR_ID=primary
 GOOGLE_CALENDAR_EMAIL=your.primary.gmail@gmail.com
@@ -366,6 +368,8 @@ Important fields:
 |----------|---------|
 | `CALENDAR_DIGEST_TIMEZONE` | Timezone used to decide the day boundary and display times |
 | `CALENDAR_DIGEST_RECIPIENTS` | Comma-separated email recipients for the digest |
+| `CALENDAR_DIGEST_AI` | `auto` runs AI when `CURSOR_API_KEY` is set; use `1` to force on or `0` to disable |
+| `CALENDAR_DIGEST_AI_MODEL` | Optional Cursor model override for calendar AI insights |
 | `GOOGLE_CALENDAR_EMAIL` | Primary Gmail address shown in digest recipient defaults |
 | `GOOGLE_CALENDAR_ID` | Google calendar to read, usually `primary` |
 | `GOOGLE_CALENDAR_TOKEN_PATH` | Separate token for calendar read + Gmail send |
@@ -421,6 +425,7 @@ The digest email includes:
 - Total meeting count.
 - Conflict group count.
 - Subtle conflict highlighting in the schedule table.
+- Optional AI daily brief, focus items, conflict explanation and recommendation, meeting priority, context, and preparation notes when `CALENDAR_DIGEST_AI=auto` and `CURSOR_API_KEY` is set.
 - Links back to Google Calendar events when Google provides them.
 
 ## Run The Gmail Draft Agent
