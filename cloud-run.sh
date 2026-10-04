@@ -4,12 +4,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-if [[ ! -d .venv ]]; then
-  python3 -m venv .venv
+PYTHON=python3
+if [[ -x .venv/bin/python ]]; then
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+  PYTHON=python
+  pip install -q -r requirements.txt
+elif python3 -m venv .venv &>/dev/null && [[ -x .venv/bin/python ]]; then
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+  PYTHON=python
+  pip install -q -r requirements.txt
+else
+  rm -rf .venv
+  pip install -q -r requirements.txt --user
 fi
-# shellcheck disable=SC1091
-source .venv/bin/activate
-pip install -q -r requirements.txt
 
 # Prefer secrets injected by Cursor Cloud; fall back to local .env
 if [[ -f .env ]]; then
@@ -19,4 +28,4 @@ if [[ -f .env ]]; then
   set +a
 fi
 
-exec python main.py run "$@"
+exec "$PYTHON" main.py run "$@"
