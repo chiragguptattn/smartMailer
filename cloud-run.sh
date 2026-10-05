@@ -5,11 +5,11 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
 ensure_venv() {
-  if [[ -d .venv ]] && [[ ! -x .venv/bin/python ]]; then
+  if [[ -d .venv ]] && [[ ! -f .venv/bin/activate ]]; then
     rm -rf .venv
   fi
   if [[ ! -d .venv ]]; then
-    if ! python3 -m venv .venv 2>/dev/null; then
+    if ! python3 -m venv .venv 2>/dev/null || [[ ! -f .venv/bin/activate ]]; then
       rm -rf .venv
       python3 -m pip install -q --user virtualenv
       python3 -m virtualenv .venv
