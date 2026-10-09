@@ -7,7 +7,9 @@ cd "$ROOT"
 USE_VENV=0
 if [[ -d .venv && -x .venv/bin/python ]]; then
   USE_VENV=1
-elif python3 -m venv .venv 2>/dev/null && [[ -x .venv/bin/python ]]; then
+elif python3 -c "import ensurepip" >/dev/null 2>&1 \
+  && python3 -m venv .venv 2>/dev/null \
+  && [[ -x .venv/bin/python ]]; then
   USE_VENV=1
 else
   rm -rf .venv
