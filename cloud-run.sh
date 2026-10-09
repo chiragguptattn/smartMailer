@@ -9,7 +9,7 @@ if [[ -x .venv/bin/python ]]; then
   # shellcheck disable=SC1091
   source .venv/bin/activate
   PYTHON=python
-elif python3 -m venv .venv 2>/dev/null && [[ -x .venv/bin/python ]]; then
+elif python3 -m venv .venv &>/dev/null && [[ -x .venv/bin/python ]]; then
   # shellcheck disable=SC1091
   source .venv/bin/activate
   PYTHON=python
