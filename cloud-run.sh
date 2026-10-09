@@ -7,7 +7,7 @@ cd "$ROOT"
 PYTHON="python3"
 if [[ ! -x .venv/bin/pip ]]; then
   rm -rf .venv
-  if python3 -m venv .venv 2>/dev/null && [[ -x .venv/bin/pip ]]; then
+  if python3 -m venv .venv &>/dev/null && [[ -x .venv/bin/pip ]]; then
     # shellcheck disable=SC1091
     source .venv/bin/activate
     PYTHON=".venv/bin/python3"
